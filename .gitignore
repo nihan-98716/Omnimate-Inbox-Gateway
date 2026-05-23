@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Compilation / Build outputs
+dist/
+build/
+tsconfig.tsbuildinfo
+
+# Environmental variables and secrets
+.env
+.env.local
+.env.*
+
+# Local file storage
+uploads/
+tmp/
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE configurations
+.idea/
+.vscode/
+*.swp
+
+# Agent CLI Files (DO NOT COMMIT)
+.antigravitycli/
