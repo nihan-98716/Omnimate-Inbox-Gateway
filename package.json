@@ -17,8 +17,11 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/multipart": "^10.0.0",
     "@prisma/client": "^6.19.3",
     "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
     "zod": "^4.4.3"
   }
 }
