@@ -84,12 +84,11 @@ export class LocalStorageService implements StorageService {
    */
   async deleteFile(fileKey: string): Promise<void> {
     const destPath = this.getFilePath(fileKey);
-    try {
-      if (fs.existsSync(destPath) && !fs.lstatSync(destPath).isDirectory()) {
-        await fs.promises.unlink(destPath);
+    if (fs.existsSync(destPath)) {
+      if (fs.lstatSync(destPath).isDirectory()) {
+        throw new Error(`EISDIR: illegal operation on a directory, unlink '${destPath}'`);
       }
-    } catch (err) {
-      console.error(`⚠️ Failed to delete file ${destPath}:`, err);
+      await fs.promises.unlink(destPath);
     }
   }
 }

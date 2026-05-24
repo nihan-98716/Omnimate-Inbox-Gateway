@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import { inboxRoutes } from './routes/inbox.routes';
 import { recentRoutes } from './routes/recent.routes';
+import { presetRoutes } from './routes/preset.routes';
 
 const app = Fastify({
   logger: {
@@ -27,6 +28,7 @@ app.register(
   async (api) => {
     await api.register(inboxRoutes);
     await api.register(recentRoutes);
+    await api.register(presetRoutes);
   },
   { prefix: '/api/v1' }
 );
