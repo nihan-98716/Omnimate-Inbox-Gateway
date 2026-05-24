@@ -1,0 +1,59 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AssetState {
+  PROCESS_NOW
+  SAVE_FOR_LATER
+  ARCHIVE
+  DELETED
+}
+
+enum AssetType {
+  PDF
+  IMAGE
+  SCREENSHOT
+  TEXT
+  OTHER
+}
+
+enum PresetType {
+  LOCAL_FOLDER
+  WEBHOOK
+  S3
+}
+
+model Asset {
+  id        String     @id @default(uuid())
+  title     String
+  type      AssetType
+  source    String     // e.g., "scanbox", "shots"
+  state     AssetState @default(PROCESS_NOW)
+  fileKey   String     // Storage file path
+  fileSize  Int        // File size in bytes
+  mimeType  String
+  checksum  String     @unique // SHA-256 hash for duplicate checks
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  deletedAt DateTime?  // Deletion timestamp for soft-deletes
+  metadata  Json?      // Custom logs or preset execution reports
+
+  @@index([state, createdAt(sort: Desc)])
+  @@index([state, updatedAt(sort: Desc)])
+}
+
+model DestinationPreset {
+  id            String     @id @default(uuid())
+  name          String
+  type          PresetType
+  schemaVersion Int        @default(1) // Version number to support dynamic config updates
+  config        Json       // Path details, webhook target URLs, headers, etc.
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
