@@ -17,7 +17,7 @@ export class PresetService {
    */
   async execute(
     asset: { id: string; title: string; fileKey: string; mimeType: string; source: string },
-    preset: { id: string; name: string; type: PresetType; config: any }
+    preset: { id: string; name: string; type: PresetType; config: any; schemaVersion: number }
   ): Promise<PresetExecutionResult> {
     const fileSourcePath = storageService.getFilePath(asset.fileKey);
 
@@ -31,12 +31,15 @@ export class PresetService {
       };
     }
 
+    // Normalize config based on schema version (Backward compatibility handling)
+    const normalizedConfig = this.getNormalizedConfig(preset);
+
     try {
       switch (preset.type) {
         case PresetType.LOCAL_FOLDER:
-          return await this.executeLocalFolder(fileSourcePath, asset.fileKey, preset.config);
+          return await this.executeLocalFolder(fileSourcePath, asset.fileKey, normalizedConfig);
         case PresetType.WEBHOOK:
-          return await this.executeWebhook(asset, preset.config);
+          return await this.executeWebhook(asset, normalizedConfig);
         default:
           return {
             success: false,
@@ -53,6 +56,23 @@ export class PresetService {
         error: err.message || String(err)
       };
     }
+  }
+
+  /**
+   * Normalizes legacy preset configurations to maintain backward compatibility
+   */
+  private getNormalizedConfig(preset: { type: PresetType; schemaVersion: number; config: any }): any {
+    const config = preset.config;
+    if (preset.schemaVersion === 1) {
+      // Legacy conversion: map "legacy_folder_path" to the new "destination_path" standard
+      if (preset.type === PresetType.LOCAL_FOLDER && config.legacy_folder_path && !config.destination_path) {
+        return {
+          ...config,
+          destination_path: config.legacy_folder_path
+        };
+      }
+    }
+    return config;
   }
 
   private async executeLocalFolder(

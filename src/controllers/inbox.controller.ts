@@ -23,6 +23,7 @@ export async function ingestAsset(req: FastifyRequest, reply: FastifyReply) {
 
   const tempKey = `tmp-${crypto.randomUUID()}`;
   let calculatedHash = '';
+  let permanentKey = '';
 
   try {
     // 1. Stage the file in the temporary folder
@@ -76,7 +77,7 @@ export async function ingestAsset(req: FastifyRequest, reply: FastifyReply) {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const cleanFilename = fileData.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const permanentKey = `assets/${year}/${month}/${day}/${hash}-${cleanFilename}`;
+    permanentKey = `assets/${year}/${month}/${day}/${hash}-${cleanFilename}`;
 
     // 6. Promote staged file to its permanent location
     await storageService.moveToPermanent(tempKey, permanentKey);
@@ -99,6 +100,15 @@ export async function ingestAsset(req: FastifyRequest, reply: FastifyReply) {
   } catch (err: any) {
     // Fail-safe cleanup: prevent staged file orphans
     await storageService.deleteTemp(tempKey);
+
+    // Clean up permanent file orphan if it was already moved
+    if (err.code !== 'P2002' && permanentKey) {
+      try {
+        await storageService.deleteFile(permanentKey);
+      } catch (cleanupErr) {
+        req.log.error(cleanupErr, `⚠️ Failed to clean up permanent file orphan: ${permanentKey}`);
+      }
+    }
 
     // Handle race conditions where another thread inserted the same file at the same millisecond
     if (err.code === 'P2002' && calculatedHash) {
@@ -212,78 +222,93 @@ export async function updateAssetState(req: FastifyRequest, reply: FastifyReply)
   }
 
   try {
-    const asset = await prisma.asset.findUnique({
-      where: { id }
-    });
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Acquire row lock to prevent race conditions during preset execution and state transition
+      const assets = await tx.$queryRawUnsafe<any[]>(
+        `SELECT * FROM "Asset" WHERE id = $1 FOR UPDATE`,
+        id
+      );
 
-    if (!asset) {
-      return reply.status(404).send({ error: 'Asset not found' });
-    }
+      if (assets.length === 0) {
+        return { status: 404, error: 'Asset not found' };
+      }
+      const dbAsset = assets[0];
 
-    // Validate state machine rules
-    if (!isValidTransition(asset.state as any, newState as any)) {
-      return reply.status(400).send({
-        error: `Illegal state transition from ${asset.state} to ${newState}`
-      });
-    }
-
-    const hookUpdate = getStateHookUpdate(newState as any);
-    let metadataUpdate = (asset.metadata as Record<string, any>) || {};
-
-    // Handle destination presets when archiving
-    if (newState === AssetState.ARCHIVE && presetId) {
-      const preset = await prisma.destinationPreset.findUnique({
-        where: { id: presetId, isActive: true }
-      });
-
-      if (!preset) {
-        return reply.status(400).send({ error: 'Selected destination preset is inactive or missing' });
+      // 2. Validate state machine rules
+      if (!isValidTransition(dbAsset.state as any, newState as any)) {
+        return {
+          status: 400,
+          error: `Illegal state transition from ${dbAsset.state} to ${newState}`
+        };
       }
 
-      if (executePreset) {
-        // Run preset action
-        const execResult = await presetService.execute(asset, preset);
-        
-        metadataUpdate = {
-          ...metadataUpdate,
-          presetExecution: execResult
-        };
+      const hookUpdate = getStateHookUpdate(newState as any);
+      let metadataUpdate = (dbAsset.metadata as Record<string, any>) || {};
 
-        // If execution fails, log it but block state transition to ARCHIVE
-        if (!execResult.success) {
-          const updated = await prisma.asset.update({
-            where: { id },
-            data: { metadata: metadataUpdate }
-          });
-          return reply.status(502).send({
-            error: `Destination preset dispatch failed: ${execResult.error}`,
-            asset: updated
-          });
+      // 3. Handle destination presets when archiving
+      if (newState === AssetState.ARCHIVE && presetId) {
+        const preset = await tx.destinationPreset.findUnique({
+          where: { id: presetId, isActive: true }
+        });
+
+        if (!preset) {
+          return { status: 400, error: 'Selected destination preset is inactive or missing' };
         }
-      } else {
-        // User links metadata without executing file copy
-        metadataUpdate = {
-          ...metadataUpdate,
-          linkedPreset: {
-            id: preset.id,
-            name: preset.name,
-            type: preset.type
-          }
-        };
-      }
-    }
 
-    // Execute database update
-    const updatedAsset = await prisma.asset.update({
-      where: { id },
-      data: {
-        state: newState,
-        metadata: metadataUpdate,
-        ...hookUpdate
+        if (executePreset) {
+          // Run preset action
+          const execResult = await presetService.execute(dbAsset, preset);
+          
+          metadataUpdate = {
+            ...metadataUpdate,
+            presetExecution: execResult
+          };
+
+          // If execution fails, log it but block state transition to ARCHIVE
+          if (!execResult.success) {
+            const updated = await tx.asset.update({
+              where: { id },
+              data: { metadata: metadataUpdate }
+            });
+            return {
+              status: 502,
+              error: `Destination preset dispatch failed: ${execResult.error}`,
+              asset: updated
+            };
+          }
+        } else {
+          // User links metadata without executing file copy
+          metadataUpdate = {
+            ...metadataUpdate,
+            linkedPreset: {
+              id: preset.id,
+              name: preset.name,
+              type: preset.type
+            }
+          };
+        }
       }
+
+      // 4. Execute database update
+      const updatedAsset = await tx.asset.update({
+        where: { id },
+        data: {
+          state: newState,
+          metadata: metadataUpdate,
+          ...hookUpdate
+        }
+      });
+
+      return { status: 200, asset: updatedAsset };
     });
 
-    return reply.send(updatedAsset);
+    if (result.status === 200) {
+      return reply.send(result.asset);
+    } else if (result.status === 502) {
+      return reply.status(502).send({ error: result.error, asset: result.asset });
+    } else {
+      return reply.status(result.status).send({ error: result.error });
+    }
   } catch (err: any) {
     console.error('❌ State Update Error:', err);
     return reply.status(500).send({ error: 'Internal server error while updating asset state' });
