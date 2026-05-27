@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { PresetType } from '@prisma/client';
 import { storageService } from './storage.service';
+import { getCircuitBreaker } from '../utils/circuit-breaker';
 
 export interface PresetExecutionResult {
   success: boolean;
@@ -125,45 +126,48 @@ export class PresetService {
     const headers = config.headers || {};
     headers['Content-Type'] = 'application/json';
 
-    // 5-second Webhook Dispatch Timeout Safeguard
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const breaker = getCircuitBreaker(url);
+    return await breaker.execute(async () => {
+      // 5-second Webhook Dispatch Timeout Safeguard
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
 
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        throw new Error(`Webhook target responded with status: ${response.status} ${response.statusText}`);
-      }
-
-      let responseText = '';
       try {
-        responseText = await response.text();
-      } catch {}
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
 
-      return {
-        success: true,
-        executedAt: new Date().toISOString(),
-        target: url,
-        details: {
-          statusCode: response.status,
-          response: responseText.slice(0, 500)
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          throw new Error(`Webhook target responded with status: ${response.status} ${response.statusText}`);
         }
-      };
-    } catch (err: any) {
-      clearTimeout(timeout);
-      if (err.name === 'AbortError') {
-        throw new Error('Webhook request timed out after 5 seconds');
+
+        let responseText = '';
+        try {
+          responseText = await response.text();
+        } catch {}
+
+        return {
+          success: true,
+          executedAt: new Date().toISOString(),
+          target: url,
+          details: {
+            statusCode: response.status,
+            response: responseText.slice(0, 500)
+          }
+        };
+      } catch (err: any) {
+        clearTimeout(timeout);
+        if (err.name === 'AbortError') {
+          throw new Error('Webhook request timed out after 5 seconds');
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   }
 }
 

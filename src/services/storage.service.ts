@@ -60,8 +60,21 @@ export class LocalStorageService implements StorageService {
       fs.mkdirSync(destDir, { recursive: true });
     }
 
-    // Perform atomic move on the local file system
-    await fs.promises.rename(tempPath, destPath);
+    try {
+      // Perform atomic move on the local file system
+      await fs.promises.rename(tempPath, destPath);
+    } catch (err: any) {
+      // On Windows, concurrent rename to the same destination can fail with EPERM or EEXIST if the file is locked/in-use
+      if (fs.existsSync(destPath)) {
+        try {
+          await fs.promises.unlink(tempPath);
+        } catch (unlinkErr) {
+          // ignore
+        }
+      } else {
+        throw err;
+      }
+    }
     return permanentKey;
   }
 

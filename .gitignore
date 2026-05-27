@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Dependency directories
 node_modules/
 jspm_packages/
@@ -16,6 +15,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+*.log
 
 # Environment variables & secrets
 .env
@@ -37,30 +37,10 @@ temp/
 *.db-journal
 *.sqlite
 *.sqlite-journal
-=======
-# Dependencies
-node_modules/
-
-# Compilation / Build outputs
-dist/
-build/
-tsconfig.tsbuildinfo
-
-# Environmental variables and secrets
-.env
-.env.local
-.env.*
-
-# Local file storage
-uploads/
-tmp/
-*.log
->>>>>>> fc047ac (Setup Fastify TypeScript Prisma and project structure)
 
 # OS metadata
 .DS_Store
 Thumbs.db
-<<<<<<< HEAD
 desktop.ini
 
 # IDEs and editors
@@ -71,21 +51,11 @@ desktop.ini
 *.njsproj
 *.sln
 *.sw?
+*.swp
 
-# Docker logs
+# Docker configurations and logs
 .docker/
 docker-compose.override.yml
 
 # AI Agent internal CLI files
 .antigravitycli/
-
-=======
-
-# IDE configurations
-.idea/
-.vscode/
-*.swp
-
-# Agent CLI Files (DO NOT COMMIT)
-.antigravitycli/
->>>>>>> fc047ac (Setup Fastify TypeScript Prisma and project structure)

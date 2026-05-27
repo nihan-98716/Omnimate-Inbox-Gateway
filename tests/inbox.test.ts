@@ -2,12 +2,26 @@ import app from '../src/app';
 import { prisma } from '../src/services/db';
 import { storageService } from '../src/services/storage.service';
 import { ExpiryService } from '../src/services/expiry.service';
-import { AssetState, AssetType, PresetType } from '@prisma/client';
+import { AssetState, AssetType, PresetType, JobStatus } from '@prisma/client';
 import { config } from '../src/config';
 import fs from 'fs';
 import path from 'path';
 import assert from 'assert';
 import crypto from 'crypto';
+
+// Automatically inject Authorization header to all fetch requests
+const originalFetch = global.fetch;
+global.fetch = function(url: any, options: any = {}) {
+  options.headers = options.headers || {};
+  if (options.headers instanceof Headers) {
+    options.headers.set('Authorization', 'Bearer test-api-key');
+  } else if (Array.isArray(options.headers)) {
+    options.headers.push(['Authorization', 'Bearer test-api-key']);
+  } else {
+    options.headers['Authorization'] = 'Bearer test-api-key';
+  }
+  return originalFetch(url, options);
+} as any;
 
 // Helper to manually build a multipart body for Fastify uploads
 function buildMultipartBody(
@@ -223,7 +237,7 @@ async function runEndToEndTests() {
       })
     );
 
-    const responses = await Promise.all(patchRequests);
+        const responses = await Promise.all(patchRequests);
     const statuses = responses.map(r => r.status);
 
     const successCount = statuses.filter(s => s === 200).length;
@@ -235,11 +249,28 @@ async function runEndToEndTests() {
       'Exactly one concurrent patch request succeeded (200), others rejected (400).'
     );
 
+    // Wait for the background BullMQ worker to process the webhook
+    const startPoll = Date.now();
+    while (webhookCallCount < 1 && Date.now() - startPoll < 5000) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
     testAssert(
       'Duplicate Webhook Dispatch Check',
       webhookCallCount === 1,
       'Preset Webhook is executed exactly once.'
     );
+
+    // Wait for background job to finish and transition the state to ARCHIVE before starting Test Case 5
+    let refreshedAsset4: any = null;
+    const startPoll4 = Date.now();
+    while (Date.now() - startPoll4 < 5000) {
+      refreshedAsset4 = await prisma.asset.findUnique({ where: { id: testAssetId } });
+      if (refreshedAsset4?.state === AssetState.ARCHIVE) {
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
 
     // -------------------------------------------------------------
     // Test Case 5: Destination Preset Compatibility & Execution
@@ -276,8 +307,20 @@ async function runEndToEndTests() {
       })
     });
 
-    const compatBody = await compatRes.json() as any;
-    testAssert('Compat Execution Status', compatRes.status === 200 && compatBody.state === AssetState.ARCHIVE, 'Legacy config normalized and file copy executed.');
+    testAssert('Compat Request Success', compatRes.status === 200, 'Legacy compat request queued successfully.');
+
+    // Wait for background job to process the copy and transition the state to ARCHIVE
+    let refreshedAssetCompat: any = null;
+    const startPollCompat = Date.now();
+    while (Date.now() - startPollCompat < 5000) {
+      refreshedAssetCompat = await prisma.asset.findUnique({ where: { id: testAssetId } });
+      if (refreshedAssetCompat?.state === AssetState.ARCHIVE) {
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    testAssert('Compat Execution State Transitioned', refreshedAssetCompat?.state === AssetState.ARCHIVE, 'Asset transitioned to ARCHIVE state after queue completion.');
 
     const expectedCopiedFile = path.join(legacyFolder, path.basename(asset1.fileKey));
     testAssert('Legacy File Copy Verified', fs.existsSync(expectedCopiedFile), 'Physical file successfully copied to destination.');
