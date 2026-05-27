@@ -14,6 +14,14 @@ const configSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
   AWS_S3_BUCKET: z.string().optional(),
+  
+  // Production Hardening configs
+  REDIS_HOST: z.string().default('localhost'),
+  REDIS_PORT: z.coerce.number().default(6379),
+  WEBHOOK_CONCURRENCY: z.coerce.number().default(5),
+  MIN_FREE_SPACE_PERCENT: z.coerce.number().default(15),
+  API_KEY: z.string().default('test-api-key'),
+  RATE_LIMIT_MAX: z.coerce.number().default(100),
 });
 
 const parsed = configSchema.safeParse(process.env);

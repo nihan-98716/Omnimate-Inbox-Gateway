@@ -28,6 +28,13 @@ enum PresetType {
   S3
 }
 
+enum JobStatus {
+  PENDING
+  PROCESSING
+  FAILED
+  COMPLETED
+}
+
 model Asset {
   id        String     @id @default(uuid())
   title     String
@@ -42,6 +49,9 @@ model Asset {
   updatedAt DateTime   @updatedAt
   deletedAt DateTime?  // Deletion timestamp for soft-deletes
   metadata  Json?      // Custom logs or preset execution reports
+
+  presetStatus JobStatus?
+  presetError  String?
 
   @@index([state, createdAt(sort: Desc)])
   @@index([state, updatedAt(sort: Desc)])

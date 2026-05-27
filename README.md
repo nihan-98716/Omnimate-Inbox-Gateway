@@ -2,7 +2,7 @@
 
 A centralized, production-grade API Gateway and Triage Storage service designed to ingest, process, and route files sent from feeder applications (**Scanbox** and **Shots**). 
 
-The application is built using **TypeScript**, **Fastify** (web gateway), **Prisma ORM** (PostgreSQL database integration), and includes atomic local file-system storage with modular driver support for future cloud staging (S3/R2).
+The application is built using **TypeScript**, **Fastify** (web gateway), **Prisma ORM** (PostgreSQL database integration), **BullMQ** (Redis-backed asynchronous background jobs), and includes atomic local file-system storage with modular driver support for S3.
 
 ---
 
@@ -14,7 +14,7 @@ The application is built using **TypeScript**, **Fastify** (web gateway), **Pris
                       | (Scanbox / Shots) |
                       +---------+---------+
                                 |
-                                | POST /api/v1/inbox
+                                | POST /api/v1/inbox (with Bearer / API-Key Auth)
                                 v
                    +------------+------------+
                    |  Fastify Ingestion API  |
@@ -65,25 +65,46 @@ The application is built using **TypeScript**, **Fastify** (web gateway), **Pris
     *   `DELETED` $\rightarrow$ `PROCESS_NOW` (Valid - Restore)
 *   State transitions use raw PostgreSQL **Pessimistic Row Locking** (`SELECT ... FOR UPDATE` inside a Prisma Transaction). This prevents race conditions under high load, ensuring that concurrent PATCH requests do not trigger duplicate preset webhook dispatches on the same asset.
 
-### 4. Destination Presets & Compatibility
-*   Supports routing files to custom local folder destinations or dispatching HTTP webhooks upon asset transition to `ARCHIVE`.
-*   Includes dynamic schema versioning fallback: legacy version 1 configurations containing `legacy_folder_path` are normalized on the fly to `destination_path` inside the service.
-*   Failed webhook dispatches cause the transition to fail with `502 Bad Gateway`, but the asset remains in `PROCESS_NOW` in the active inbox with error logs stored in the metadata column, preventing silent losses.
+### 4. Destination Presets & Asynchronous Processing
+*   Supports routing files to custom local folder destinations or dispatching HTTP webhooks when an asset transitions to `ARCHIVE`.
+*   **Decoupled Webhooks**: Webhook executions are moved out of database transaction blocks to prevent holding DB connections and row locks.
+*   **Job Queue (BullMQ + Redis)**: Background processing is handled asynchronously via a BullMQ worker queue backed by persistent Redis.
+*   **State Separation**: Decouples active inbox status from processing details using `presetStatus` (`PENDING`, `PROCESSING`, `FAILED`, `COMPLETED`) and `presetError` on the DB schema.
+*   **Circuit Breaker**: Webhook dispatches are protected by a custom Circuit Breaker (CLOSED, OPEN, HALF_OPEN) to prevent cascading failures.
+*   **Retries**: Webhooks have exponential backoff retries (3 attempts).
 
 ### 5. Expiry Lifecycle & Disk Sync Safety
 *   A background cron daemon periodically sweeps soft-deleted (`DELETED`) assets.
 *   Assets are hard-purged after 30 days.
 *   **Sync Guarantee**: The purger deletes physical files first. If physical file unlinking fails (e.g., directory is locked or permissions error), the database delete transaction is aborted. This guarantees that no database records are removed if the physical file remains.
 
+### 6. Disk Capacity Safeguard
+*   Ingestion requests verify available disk space in the uploads directory.
+*   If the available free space drops below the configurable limit (default: **15%**), uploads are rejected immediately with a `507 Insufficient Storage` status code, shielding the server against disk depletion crashes.
+
+### 7. Security & DDoS Protection
+*   **API Authentication**: All API endpoints (except health and metrics) are protected using header-based authorization. Clients must provide `Authorization: Bearer <key>` or `x-api-key: <key>`.
+*   **Rate Limiting**: Integrated `@fastify/rate-limit` for DDoS shielding, capping requests per minute per IP.
+
+### 8. Observability & Graceful Shutdowns
+*   **Health Endpoints**:
+    *   `/health/live`: Basic liveness check.
+    *   `/health/ready`: Assesses database and Redis connectivity.
+    *   `/health/circuit-breaker`: Reports the current state of the preset webhook circuit breaker.
+*   **Telemetry Metrics**: `/metrics` returns Prometheus-compatible metrics tracking HTTP request latency, count, database query durations, and background worker queue size.
+*   **Graceful Shutdown**: The service cleanly terminates Redis client connections and BullMQ queues/workers when shutting down, preventing open-handle process hangs.
+
 ---
 
 ## 🛠️ Tech Stack
 *   **Runtime**: Node.js (v18+)
 *   **Language**: TypeScript
-*   **Web Framework**: Fastify (with `@fastify/multipart` & `@fastify/cors`)
+*   **Web Framework**: Fastify (with `@fastify/multipart`, `@fastify/cors`, and `@fastify/rate-limit`)
 *   **Database ORM**: Prisma v6 (PostgreSQL)
+*   **Background Worker**: BullMQ + Redis (`ioredis`)
 *   **Validation**: Zod (strongly-typed runtime checks)
 *   **Scheduler**: node-cron (background daemon)
+*   **Disk Check**: check-disk-space
 *   **Test Runner**: tsx + assert (lightweight typed runner)
 
 ---
@@ -98,24 +119,33 @@ DATABASE_URL=postgresql://postgres:postgrespassword@localhost:5432/omnimate_inbo
 STORAGE_DRIVER=local
 UPLOAD_DIR=./uploads
 EXPIRE_AFTER_DAYS=30
-```
 
-*   `PORT`: Port the Fastify server runs on locally.
-*   `DATABASE_URL`: Connection string for PostgreSQL.
-*   `STORAGE_DRIVER`: Driver for storage (`local` / `s3`).
-*   `UPLOAD_DIR`: Target directory path for file storage.
-*   `EXPIRE_AFTER_DAYS`: Days before a soft-deleted asset is purged from the system.
+# Redis configuration for background queue
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# Queue settings
+WEBHOOK_CONCURRENCY=5
+
+# Disk Space Safeguard
+MIN_FREE_SPACE_PERCENT=15
+
+# API Authentication Key
+API_KEY=your-secure-api-key-here
+
+# Rate Limiting max requests per minute
+RATE_LIMIT_MAX=100
+```
 
 ---
 
 ## 📦 Local Installation & Setup
 
-### 1. Start PostgreSQL Database
-A pre-configured Docker Compose file is included:
+### 1. Start PostgreSQL & Persistent Redis Database
+A pre-configured Docker Compose file is included that starts PostgreSQL and Redis with append-only persistence enabled:
 ```bash
 docker-compose up -d
 ```
-This spins up PostgreSQL on port `5432` with username `postgres` and password `postgrespassword`.
 
 ### 2. Install Project Dependencies
 ```bash
@@ -127,7 +157,6 @@ Deploy the database schema via Prisma:
 ```bash
 npx prisma migrate dev
 ```
-This runs the SQL migrations located in `./prisma/migrations/`.
 
 ### 4. Build and Run Server
 ```bash
@@ -142,6 +171,8 @@ npm run build
 
 ## 📡 API Reference
 
+*Note: All core API routes require authentication header: `Authorization: Bearer <your-api-key>` or `x-api-key: <your-api-key>`.*
+
 ### Ingestion Pipeline
 *   **POST** `/api/v1/inbox`
     *   **Body**: `multipart/form-data`
@@ -150,6 +181,7 @@ npm run build
         *   `title`: Optional asset title.
     *   **Response (201 Created)**: Returns the newly created `Asset` object.
     *   **Response (200 OK)**: Returns the existing deduplicated `Asset` object if the checksum already existed.
+    *   **Response (507 Insufficient Storage)**: Upload rejected because disk free space is below the safe threshold.
 
 ### Inbox Listing
 *   **GET** `/api/v1/inbox`
@@ -170,28 +202,32 @@ npm run build
           "executePreset": true
         }
         ```
-    *   **Response (200 OK)**: Updated `Asset` metadata.
-    *   **Response (502 Bad Gateway)**: Preset webhook execution failed (asset remains in `PROCESS_NOW`).
+    *   **Response (200 OK)**: Updated `Asset` metadata (presetStatus is updated to `PENDING` and queued in BullMQ background job processor).
 
 ### Soft-Delete & Archives Page
 *   **GET** `/api/v1/recents`
     *   **Query Params**: `limit`, `cursor`.
     *   **Response (200 OK)**: Returns list of deleted and archived assets. Soft-deleted assets include a computed `daysUntilPurge` countdown integer.
 
+### Health and Metrics (Public)
+*   **GET** `/health/live`
+*   **GET** `/health/ready`
+*   **GET** `/health/circuit-breaker`
+*   **GET** `/metrics` (Prometheus telemetry metrics)
+
 ---
 
 ## 🧪 Testing and Verification
 
-Run the full end-to-end integration test suite using standard npm scripting:
+Run the full end-to-end integration and stress validation suite using standard npm scripting:
 
 ```bash
-# Runs tests/inbox.test.ts
-npm test
+# Runs the full stress and integration test runner
+npx tsx tests/stress/run-stress-suite.ts
 ```
 
 ### Additional System Verification Scripts
-*   `npx tsx src/test-system-validation.ts`: Executes a rigorous 36-check system test suite covering simultaneous uploads, transition concurrency, database rollbacks, webhook failures, and pagination.
-*   `npx tsx src/test-database.ts`: Validates schema validity, unique constraints, and transaction rollback properties.
-*   `npx tsx src/test-transitions.ts`: Validates states validation mapping.
-*   `npx tsx src/test-failures.ts`: Tests webhook errors and unlinking failure locking blocks.
-*   `npx tsx src/test-storage.ts`: Tests disk movements, staged moves, and temp deletes.
+*   `npx tsx tests/stress/stress-queue.ts`: Tests BullMQ queueing concurrency limits and Redis container restart persistence mid-flight.
+*   `npx tsx tests/stress/stress-disk.ts`: Tests low disk space simulation and unlinking error fallback unlinking.
+*   `npx tsx tests/stress/stress-endurance.ts`: Simulates sustained production API traffic for endurance testing.
+*   `npx tsx src/test-system-validation.ts`: Executes baseline verification checks.

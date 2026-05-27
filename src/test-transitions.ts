@@ -3,6 +3,20 @@ import { prisma } from './services/db';
 import { AssetState, AssetType } from '@prisma/client';
 import assert from 'assert';
 
+// Automatically inject Authorization header to all fetch requests
+const originalFetch = global.fetch;
+global.fetch = function(url: any, options: any = {}) {
+  options.headers = options.headers || {};
+  if (options.headers instanceof Headers) {
+    options.headers.set('Authorization', 'Bearer test-api-key');
+  } else if (Array.isArray(options.headers)) {
+    options.headers.push(['Authorization', 'Bearer test-api-key']);
+  } else {
+    options.headers['Authorization'] = 'Bearer test-api-key';
+  }
+  return originalFetch(url, options);
+} as any;
+
 async function runTransitionsTests() {
   console.log('📡 Starting State Transitions and API pagination verification...\n');
 
